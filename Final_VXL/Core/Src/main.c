@@ -24,11 +24,10 @@
 #include"ws2812.h"
 #include "stdlib.h"
 #include "arm_math.h"
-#include"ws2812_demos.h"
 #include <stdio.h>
 #define min(a,b) (((a)<(b))?(a):(b))
 #define SamplesFFT 256
-#define WS2812_NUM_LEDS 64
+
 uint16_t colorValue[32]= {0x000F,0x03E0,0x03EF,0x7800,0x780F,0x7BE0,
 		                  0xC618,0x001F,0x07E0,0x07FF,0xF800,0xF81F,
 						  0xFFE0,0xFFFF,0xFD20,0XBC40,0XFC07,0x000F,
@@ -58,9 +57,9 @@ ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
 TIM_HandleTypeDef htim3;
-TIM_HandleTypeDef htim4;
-DMA_HandleTypeDef hdma_tim4_ch1;
 
+DMA_HandleTypeDef hdma_tim4_ch1;
+TIM_HandleTypeDef htim4;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
@@ -85,7 +84,6 @@ uint16_t adcValue[SamplesFFT];
 float32_t input[SamplesFFT];
 float32_t output[SamplesFFT];
 uint32_t doConvert = SamplesFFT;
-ws2812_handleTypeDef ws2812;
 volatile uint8_t buffer_half = 0;         // Cờ nửa đầu buffer
 volatile uint8_t buffer_full = 0;
 
@@ -93,29 +91,11 @@ volatile uint8_t buffer_full = 0;
 
 
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
-	if(doConvert >0) doConvert--;
-}
-
 // Done sending first half of the DMA buffer - this can now safely be updated
-void HAL_TIM_PWM_PulseFinishedHalfCpltCallback(TIM_HandleTypeDef *htim) {
 
-	if (htim->Instance == TIM4) {
-	        buffer_half = 0; // Nửa đầu sẵn sàng cập nhật
-	        ws2812_update_buffer(&ws2812, &ws2812.dma_buffer[0]);
-	    }
-}
 
 // Done sending the second half of the DMA buffer - this can now be safely updated
-void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim) {
 
-	if (htim->Instance == TIM4) {
-	        buffer_full = 1; // Toàn bộ buffer đã truyền
-	        buffer_half = 1; // Nửa sau sẵn sàng cập nhật
-	        ws2812_update_buffer(&ws2812, &ws2812.dma_buffer[BUFFER_SIZE]);
-	    }
-
-}
 
 void uart_debug(const char *msg) {
     HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
@@ -141,18 +121,24 @@ void uart_debug_float(const char *label, float value) {
     uart_debug(buffer);
 }
 
-void update_led_matrix(uint8_t *ledMatrix, ws2812_handleTypeDef *ws2812) {
-    if (buffer_half == 0 || buffer_full == 1) { // Chỉ cập nhật khi buffer sẵn sàng
-        zeroLedValues(ws2812);
-        for (int col = 0; col < 8; col++) {
-            for (int row = 0; row < 8; row++) {
-                int ledIndex = col * 8 + row;
-                setLedValues(ws2812, ledIndex, 0, 255, 0); // R=0, G=255, B=0 (màu xanh cố định)
-            }
-        }
-        ws2812->is_dirty = 1;
-        buffer_full = 0; // Đặt lại sau khi cập nhật
-    }
+void update_led_matrix(uint8_t *ledMatrix) {
+	    for (int col = 0; col < 8; col++) {
+	        int height = ledMatrix[col]; // Độ cao của cột hiện tại
+	        for (int row = 0; row < 8; row++) {
+	            uint16_t ledIndex = col + row * 8; // Tính chỉ số LED (ma trận 8x8)
+	            if (row < height) { // Chỉ bật LED nếu hàng nhỏ hơn độ cao
+	                uint8_t intensity = (row * 32) > 255 ? 255 : (row * 32); // Ánh xạ 0-8 thành 0-255
+	                // Gradient màu: đỏ (đáy), xanh lá (giữa), xanh dương (đỉnh)
+	                uint8_t red = (height - row) * 32 > 255 ? 255 : (height - row) * 32;   // Giảm dần từ đỏ
+	                uint8_t green = (row * 32) > 255 ? 255 : (row * 32);                   // Tăng dần xanh lá
+	                uint8_t blue = (row * 16) > 255 ? 255 : (row * 16);                    // Tăng dần xanh dương
+	                WS2812_Set(ledIndex, red, green, blue); // Đặt màu cho LED
+	            } else {
+	                WS2812_Set(ledIndex, 0, 0, 0); // Tắt LED nếu vượt quá độ cao
+	            }
+	        }
+	    }
+	    // Giả sử DMA đã được kích hoạt, ví dụ: HAL_TIM_PWM_Start_DMA(...)
 }
 
 /* USER CODE END 0 */
@@ -199,12 +185,9 @@ int main(void)
    arm_rfft_fast_init_f32(&fftInstance, SamplesFFT);
 
 
+   WS2812_Init();
 
-       if (ws2812_init(&ws2812, &htim4, TIM_CHANNEL_1, WS2812_NUM_LEDS) != WS2812_Ok) {
-           uart_debug("WS2812 Init Failed!\r\n");
-           while (1);
-       }
-       uart_debug("Starting DMA...\r\n");
+   HAL_TIM_PWM_Start_DMA(&htim4, TIM_CHANNEL_1, (uint32_t *)WS2812_RGB_Buff, sizeof(WS2812_RGB_Buff)/sizeof(int));
 
 
   /* USER CODE END 2 */
@@ -302,8 +285,8 @@ int main(void)
 
 
 	  	 		  		//출력 결과�? 128개로 분할
-	  	 		//   update_led_matrix(ledMatrix, &ws2812);
-	  	 		 ws2812_demo_task(&ws2812, HAL_GetTick(), &next_led, ledMatrix);
+	  	 		   update_led_matrix(ledMatrix);
+	  	 	//	 ws2812_demo_task(&ws2812, HAL_GetTick(), &next_led, ledMatrix);
 
 	  	 		  	  uart_debug("Spectrum displayed to matrix\r\n");
 	  	 		}
